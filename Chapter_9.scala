@@ -1,6 +1,11 @@
 import cats.effect.{Concurrent, IO}
 import cats.implicits.*
 import cats.effect.unsafe.implicits.global
+import fs2.*
+
+import scala.concurrent.duration
+import java.util.concurrent.*
+import scala.concurrent.duration.FiniteDuration
 
 object Main {
   object model {
@@ -14,6 +19,14 @@ object Main {
   }
 
   import model._
+
+  def rates(from: Currency, to: Currency): Stream[IO, BigDecimal] =
+    Stream
+      .eval(exchangeTable(from)) //创建一个单元素流,该流使用IO,产生单个BigDecimal,然后repeat
+      .repeat
+      .map(extractSingleCurrencyRate(to)) //提取单个汇率的函数映射流的单个值
+      .unNone //过滤None
+      .orElse(rates(from, to))
 
   def trending(rates: List[BigDecimal]): Boolean =
     rates.size > 1 && rates.zip(rates.drop(1)).forall {
@@ -46,15 +59,28 @@ object Main {
     } yield rate
 
   def lastRate(from: Currency, to: Currency, n: Int): IO[List[BigDecimal]] = //获取被兑换货币和目的货币,,返IO[]
-   List.range(0,n).map(_=>currencyRate(from,to)).sequence
-    
+    List.range(0, n).map(_ => currencyRate(from, to)).sequence
+
+  val delay: FiniteDuration = FiniteDuration(1, TimeUnit.SECONDS)
+  val ticks: Stream[IO, Unit] = Stream.fixedRate[IO](delay)  //一个Stream值,执行后每一s输出一个Unit值,在等待时,不会阻塞运行线程
 
   def exchangeIfTrending(amount: BigDecimal, from: Currency, to: Currency): IO[BigDecimal] =
-    for {
-      rates <- lastRate(from, to,3)
+    rates(from, to)
+      .zipLeft(ticks) //等待IO调用
+      .sliding(3)
+      .map(_.toList)
+      .filter(trending)
+      .map(_.last)
+      .take(1)
+      .compile
+      .lastOrError
+      .map(_ * amount)
+  /*  for {
+      rates <- lastRate(from, to, 3)
       result <- if (trending(rates)) IO.pure(amount * rates.last)
       else exchangeIfTrending(amount, from, to)
-    } yield result//有忽略潜在数据的问题
+    } yield result //有忽略潜在数据的问题
+  */
   /* 2,返回值与一相同为IO[Option[BigDecimal]].for {
     rates <- lastRate(from, to)
     result <- if (trending(rates)) IO.pure(Some(amount * rates.last))
